@@ -114,23 +114,23 @@ async def approve_transaction(token: str, transaction_id: str, approve: bool = T
             
             if response.status_code == 200:
                 data = response.json()
-                print(f"  ✓ {action.capitalize()}d transaction {transaction_id[:8]}...")
+                print(f"  [OK] {action.capitalize()}d transaction {transaction_id[:8]}...")
                 if "violations" in data and data.get("status") == "blocked":
-                    print(f"    ⚠️  Warning: Transaction still blocked by rules")
+                    print(f"    [WARNING] Warning: Transaction still blocked by rules")
                 return True
             else:
-                print(f"  ✗ Failed to {action} transaction {transaction_id[:8]}...: {response.status_code}")
+                print(f"  [ERROR] Failed to {action} transaction {transaction_id[:8]}...: {response.status_code}")
                 print(f"    Response: {response.text[:200]}")
                 return False
                 
     except httpx.TimeoutException:
-        print(f"  ✗ Timeout while trying to {action} transaction {transaction_id[:8]}...")
+        print(f"  [ERROR] Timeout while trying to {action} transaction {transaction_id[:8]}...")
         return False
     except Exception as e:
-        print(f"  ✗ Error {action}ing transaction {transaction_id[:8]}...: {e}")
+        print(f"  [ERROR] Error {action}ing transaction {transaction_id[:8]}...: {e}")
         return False
 
-async def approve_all_pending(approve: bool = True):
+async def approve_all_pending(approve: bool = True, skip_confirm: bool = False):
     """Approve or reject all pending transactions"""
     action = "approve" if approve else "reject"
     
@@ -144,17 +144,17 @@ async def approve_all_pending(approve: bool = True):
     # Get admin token
     token = await get_admin_token()
     if not token:
-        print("\n❌ Failed to authenticate as admin")
+        print("\n[ERROR] Failed to authenticate as admin")
         print("Make sure ADMIN_EMAIL and ADMIN_PASSWORD are set correctly")
         return
     
-    print("✓ Authenticated as admin")
+    print("[OK] Authenticated as admin")
     
     # Get pending transactions
     pending = await get_pending_transactions(token)
     
     if not pending:
-        print("\n✓ No pending transactions to process")
+        print("\n[OK] No pending transactions to process")
         return
     
     # Display pending transactions
@@ -175,14 +175,18 @@ async def approve_all_pending(approve: bool = True):
     
     # Confirm action
     print("\n" + "="*70)
-    if approve:
-        confirm = input(f"Are you sure you want to APPROVE all {len(pending)} transactions? (yes/no): ")
+    if not skip_confirm:
+        if approve:
+            confirm = input(f"Are you sure you want to APPROVE all {len(pending)} transactions? (yes/no): ")
+        else:
+            confirm = input(f"Are you sure you want to REJECT all {len(pending)} transactions? (yes/no): ")
+        
+        if confirm.lower() not in ['yes', 'y']:
+            print("Cancelled.")
+            return
     else:
-        confirm = input(f"Are you sure you want to REJECT all {len(pending)} transactions? (yes/no): ")
-    
-    if confirm.lower() not in ['yes', 'y']:
-        print("Cancelled.")
-        return
+        action_text = "APPROVE" if approve else "REJECT"
+        print(f"Auto-{action_text.lower()}ing all {len(pending)} transactions (--yes flag set)...")
     
     # Process all transactions
     print(f"\nProcessing {len(pending)} transactions...")
@@ -208,16 +212,16 @@ async def approve_all_pending(approve: bool = True):
     print(f"Failed: {fail_count}")
     print("="*70)
 
-async def approve_all_direct_db():
+async def approve_all_direct_db(skip_confirm: bool = False):
     """Approve all pending transactions directly via database (bypasses action blocker check)"""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
-        print("❌ SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for direct DB access")
+        print("[ERROR] SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set for direct DB access")
         return
     
     print("="*70)
     print("APPROVE ALL PENDING TRANSACTIONS (Direct Database)")
     print("="*70)
-    print("⚠️  This bypasses the action blocker service check")
+    print("[WARNING] This bypasses the action blocker service check")
     print("="*70)
     
     try:
@@ -231,7 +235,7 @@ async def approve_all_direct_db():
         pending = result.data if result.data else []
         
         if not pending:
-            print("\n✓ No pending transactions found")
+            print("\n[OK] No pending transactions found")
             return
         
         print(f"\nFound {len(pending)} pending transactions")
@@ -243,10 +247,13 @@ async def approve_all_direct_db():
                   f"Created: {tx.get('created_at', 'N/A')}")
         
         # Confirm
-        confirm = input(f"\nApprove all {len(pending)} transactions? (yes/no): ")
-        if confirm.lower() not in ['yes', 'y']:
-            print("Cancelled.")
-            return
+        if not skip_confirm:
+            confirm = input(f"\nApprove all {len(pending)} transactions? (yes/no): ")
+            if confirm.lower() not in ['yes', 'y']:
+                print("Cancelled.")
+                return
+        else:
+            print(f"\nAuto-approving all {len(pending)} transactions (--yes flag set)...")
         
         # Update all to approved
         for tx in pending:
@@ -255,12 +262,12 @@ async def approve_all_direct_db():
                 "reviewed_at": datetime.utcnow().isoformat(),
                 "reviewed_by": None  # Script approval
             }).eq("id", tx["id"]).execute()
-            print(f"✓ Approved transaction {tx['id'][:8]}...")
+            print(f"[OK] Approved transaction {tx['id'][:8]}...")
         
-        print(f"\n✓ Successfully approved {len(pending)} transactions")
+        print(f"\n[OK] Successfully approved {len(pending)} transactions")
         
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\n[ERROR] Error: {e}")
         import traceback
         traceback.print_exc()
 
@@ -271,11 +278,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Approve or reject all pending transactions")
     parser.add_argument("--reject", action="store_true", help="Reject instead of approve")
     parser.add_argument("--direct-db", action="store_true", help="Use direct database access (bypasses action blocker)")
+    parser.add_argument("--yes", action="store_true", help="Skip confirmation prompt")
     
     args = parser.parse_args()
     
     if args.direct_db:
-        asyncio.run(approve_all_direct_db())
+        asyncio.run(approve_all_direct_db(skip_confirm=args.yes))
     else:
-        asyncio.run(approve_all_pending(approve=not args.reject))
+        asyncio.run(approve_all_pending(approve=not args.reject, skip_confirm=args.yes))
 
