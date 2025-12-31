@@ -66,6 +66,12 @@ class TransactionCheckRequest(BaseModel):
     amount: float
     sender_balance: Optional[float] = 0
 
+class ApproveTransactionRequest(BaseModel):
+    transaction_id: str
+    approve: bool
+    reviewed_by: Optional[str] = None  # Admin user ID
+    review_notes: Optional[str] = None
+
 @app.get("/")
 def read_root():
     return {"message": "Action Blocker API", "status": "running"}
@@ -125,4 +131,118 @@ def check_transaction(request: TransactionCheckRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/approve-transaction")
+def approve_transaction(request: ApproveTransactionRequest):
+    """
+    Approve or reject a pending transaction
+    This is the central authority for all approval decisions
+    """
+    try:
+        from datetime import datetime
+        supabase_client = get_supabase()
+        
+        # Get pending transaction
+        pending_result = supabase_client.table("pending_transactions").select("*").eq(
+            "id", request.transaction_id
+        ).execute()
+        
+        if not pending_result.data or len(pending_result.data) == 0:
+            raise HTTPException(status_code=404, detail="Pending transaction not found")
+        
+        pending_tx = pending_result.data[0]
+        current_status = pending_tx.get("status", "pending")
+        
+        # Check if already processed
+        if current_status == "approved" and request.approve:
+            return {
+                "message": "Transaction already approved",
+                "status": "approved",
+                "transaction_id": request.transaction_id
+            }
+        if current_status == "rejected" and not request.approve:
+            return {
+                "message": "Transaction already rejected",
+                "status": "rejected"
+            }
+        
+        if current_status != "pending":
+            raise HTTPException(status_code=400, detail=f"Transaction is already {current_status}, cannot change status")
+        
+        # Update pending transaction status
+        update_data = {
+            "status": "approved" if request.approve else "rejected",
+            "reviewed_at": datetime.utcnow().isoformat(),
+            "reviewed_by": request.reviewed_by
+        }
+        if request.review_notes:
+            update_data["review_notes"] = request.review_notes
+        
+        supabase_client.table("pending_transactions").update(update_data).eq(
+            "id", request.transaction_id
+        ).execute()
+        
+        # If approved, execute the transaction
+        if request.approve:
+            from_user_id = pending_tx["from_user_id"]
+            to_user_id = pending_tx["to_user_id"]
+            amount = float(pending_tx["amount"])
+            
+            # Get sender's wallet
+            sender_wallet = supabase_client.table("wallets").select("balance").eq("user_id", from_user_id).execute()
+            if not sender_wallet.data:
+                # Update back to pending
+                supabase_client.table("pending_transactions").update({
+                    "status": "pending",
+                    "violations": json.dumps(["Sender wallet not found"])
+                }).eq("id", request.transaction_id).execute()
+                raise HTTPException(status_code=400, detail="Sender wallet not found")
+            
+            sender_balance = float(sender_wallet.data[0]["balance"])
+            
+            # Check if sender has sufficient balance
+            if sender_balance < amount:
+                # Update back to pending
+                supabase_client.table("pending_transactions").update({
+                    "status": "pending",
+                    "violations": json.dumps([f"Insufficient balance: ${sender_balance:.2f} < ${amount:.2f}"])
+                }).eq("id", request.transaction_id).execute()
+                raise HTTPException(status_code=400, detail=f"Insufficient balance: ${sender_balance:.2f} < ${amount:.2f}")
+            
+            # Get recipient's wallet
+            recipient_wallet = supabase_client.table("wallets").select("balance").eq("user_id", to_user_id).execute()
+            recipient_balance = float(recipient_wallet.data[0]["balance"]) if recipient_wallet.data else 1000.0
+            
+            # Update balances
+            new_sender_balance = sender_balance - amount
+            new_recipient_balance = recipient_balance + amount
+            
+            supabase_client.table("wallets").update({"balance": new_sender_balance}).eq("user_id", from_user_id).execute()
+            supabase_client.table("wallets").update({"balance": new_recipient_balance}).eq("user_id", to_user_id).execute()
+            
+            # Create transaction record
+            transaction = supabase_client.table("transactions").insert({
+                "from_user_id": from_user_id,
+                "to_user_id": to_user_id,
+                "amount": amount
+            }).execute()
+            
+            return {
+                "message": "Transaction approved and executed",
+                "transaction_id": transaction.data[0]["id"] if transaction.data else None,
+                "status": "approved",
+                "executed": True
+            }
+        else:
+            # Rejected
+            return {
+                "message": "Transaction rejected",
+                "status": "rejected",
+                "executed": False
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing approval: {str(e)}")
 
