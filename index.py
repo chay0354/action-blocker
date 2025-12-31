@@ -182,7 +182,7 @@ def approve_transaction(request: ApproveTransactionRequest):
             "id", request.transaction_id
         ).execute()
         
-        # If approved, execute the transaction
+        # If approved, re-check rules and execute the transaction
         if request.approve:
             from_user_id = pending_tx["from_user_id"]
             to_user_id = pending_tx["to_user_id"]
@@ -199,6 +199,31 @@ def approve_transaction(request: ApproveTransactionRequest):
                 raise HTTPException(status_code=400, detail="Sender wallet not found")
             
             sender_balance = float(sender_wallet.data[0]["balance"])
+            
+            # Re-check transaction against rules (Action Blocker validates again)
+            engine = get_rules_engine()
+            context = {
+                "sender_balance": sender_balance,
+                "supabase": supabase_client
+            }
+            
+            transaction = {
+                "from_user_id": from_user_id,
+                "to_user_id": to_user_id,
+                "amount": amount
+            }
+            
+            needs_approval, violations = engine.check_transaction(transaction, context)
+            
+            # If rules still flag violations, admin can override, but we log it
+            if needs_approval and violations:
+                # Admin is explicitly approving despite violations - allow override
+                # But we update violations to show current rule status
+                print(f"⚠️  Admin approving transaction despite current violations: {violations}")
+                # Update violations in pending_transactions to reflect current rule check
+                supabase_client.table("pending_transactions").update({
+                    "violations": json.dumps(violations)
+                }).eq("id", request.transaction_id).execute()
             
             # Check if sender has sufficient balance
             if sender_balance < amount:
