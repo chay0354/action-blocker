@@ -19,7 +19,7 @@ from supabase import create_client, Client
 # Load environment variables
 load_dotenv()
 
-app = FastAPI(title="Action Blocker API")
+app = FastAPI(title="Action Blocker API", redirect_slashes=False)
 
 # CORS middleware
 allowed_origins = os.getenv("ALLOWED_ORIGINS", "*").split(",")
@@ -31,17 +31,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Supabase client
-supabase_url = os.getenv("SUPABASE_URL")
-supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# Initialize Supabase client and rules engine lazily
+supabase: Optional[Client] = None
+rules_engine: Optional[RulesEngine] = None
 
-if not supabase_url or not supabase_service_key:
-    raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set")
+def get_supabase() -> Client:
+    """Get or initialize Supabase client"""
+    global supabase
+    if supabase is None:
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        
+        if not supabase_url or not supabase_service_key:
+            raise HTTPException(
+                status_code=500,
+                detail="SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set as environment variables"
+            )
+        
+        supabase = create_client(supabase_url, supabase_service_key)
+    return supabase
 
-supabase: Client = create_client(supabase_url, supabase_service_key)
-
-# Initialize rules engine
-rules_engine = RulesEngine(supabase)
+def get_rules_engine() -> RulesEngine:
+    """Get or initialize rules engine"""
+    global rules_engine
+    if rules_engine is None:
+        supabase_client = get_supabase()
+        rules_engine = RulesEngine(supabase_client)
+    return rules_engine
 
 # Request models
 class TransactionCheckRequest(BaseModel):
@@ -62,14 +78,17 @@ def health_check():
 def get_status():
     """Get service status"""
     try:
+        engine = get_rules_engine()
         # Get active rules count
-        active_rules = len([r for r in rules_engine.rules if r.enabled])
+        active_rules = len([r for r in engine.rules if r.enabled])
         return {
             "status": "running",
             "running": True,
-            "rules_count": len(rules_engine.rules),
+            "rules_count": len(engine.rules),
             "active_rules": active_rules
         }
+    except HTTPException:
+        raise
     except Exception as e:
         return {
             "status": "error",
@@ -81,9 +100,12 @@ def get_status():
 def check_transaction(request: TransactionCheckRequest):
     """Check if a transaction needs approval based on rules"""
     try:
+        engine = get_rules_engine()
+        supabase_client = get_supabase()
+        
         context = {
             "sender_balance": request.sender_balance,
-            "supabase": supabase
+            "supabase": supabase_client
         }
         
         transaction = {
@@ -92,13 +114,15 @@ def check_transaction(request: TransactionCheckRequest):
             "amount": request.amount
         }
         
-        needs_approval, violations = rules_engine.check_transaction(transaction, context)
+        needs_approval, violations = engine.check_transaction(transaction, context)
         
         return {
             "needs_approval": needs_approval,
             "violations": violations,
             "approved": not needs_approval
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
