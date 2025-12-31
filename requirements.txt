@@ -7,4 +7,6 @@ passlib[bcrypt]
 python-multipart
 pydantic
 httpx
+mangum
+
 

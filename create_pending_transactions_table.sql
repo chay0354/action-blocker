@@ -61,3 +61,4 @@ VALUES
     ('large_percentage', 'Large Percentage', 'Flag if transaction exceeds 50% of user balance', 'large_percentage', '{"percentage_threshold": 50.0}', true)
 ON CONFLICT (rule_id) DO NOTHING;
 
+

@@ -19,12 +19,21 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, os.path.dirname(__file__))
 from rules_engine import RulesEngine
 
-# Load .env from wallet-back directory (parent/../wallet-back)
-env_path = os.path.join(os.path.dirname(__file__), '..', 'wallet-back', '.env')
-if os.path.exists(env_path):
-    load_dotenv(env_path)
-else:
-    # Fallback to current directory
+# Load .env files - prioritize local .env, then fallback to wallet-back/.env
+# First, try to load from action-blocker/.env (current directory)
+local_env_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(local_env_path):
+    load_dotenv(local_env_path, override=True)  # override=True ensures local values take precedence
+    print(f"✅ Loaded environment from: {local_env_path}")
+
+# Also load from wallet-back/.env if it exists (for backward compatibility)
+wallet_back_env_path = os.path.join(os.path.dirname(__file__), '..', 'wallet-back', '.env')
+if os.path.exists(wallet_back_env_path):
+    load_dotenv(wallet_back_env_path)  # This won't override existing values
+    print(f"✅ Also loaded from: {wallet_back_env_path}")
+
+# Final fallback to current directory .env (if not already loaded)
+if not os.path.exists(local_env_path):
     load_dotenv()
 
 class ActionBlockerHTTPHandler(BaseHTTPRequestHandler):
@@ -68,6 +77,62 @@ class ActionBlockerHTTPHandler(BaseHTTPRequestHandler):
             else:
                 response = json.dumps({"message": "Service not running", "status": "stopped"})
             self.wfile.write(response.encode())
+        elif self.path == '/api/check-transaction' or self.path == '/check-transaction':
+            # Check transaction endpoint
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = self.rfile.read(content_length)
+            
+            try:
+                transaction_data = json.loads(post_data.decode('utf-8'))
+                service = self.server.service
+                
+                if not service or not service.rules_engine:
+                    self.send_response(503)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "error": "Service not initialized",
+                        "needs_approval": True,
+                        "violations": ["Action Blocker Service is not running"]
+                    }).encode())
+                    return
+                
+                # Check transaction against rules
+                context = {
+                    "sender_balance": transaction_data.get("sender_balance", 0),
+                    "supabase": service.supabase
+                }
+                
+                transaction = {
+                    "from_user_id": transaction_data.get("from_user_id"),
+                    "to_user_id": transaction_data.get("to_user_id"),
+                    "amount": transaction_data.get("amount")
+                }
+                
+                needs_approval, violations = service.rules_engine.check_transaction(transaction, context)
+                
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                
+                response = json.dumps({
+                    "needs_approval": needs_approval,
+                    "violations": violations,
+                    "approved": not needs_approval
+                })
+                self.wfile.write(response.encode())
+                
+            except json.JSONDecodeError:
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": str(e), "needs_approval": True}).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -108,9 +173,12 @@ class ActionBlockerService:
             supabase_url = os.getenv("SUPABASE_URL")
             supabase_service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
             
-            if not supabase_url or not supabase_service_key:
-                raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set in .env file")
+            if not supabase_url:
+                raise ValueError("SUPABASE_URL must be set in .env file (action-blocker/.env or wallet-back/.env)")
+            if not supabase_service_key:
+                raise ValueError("SUPABASE_SERVICE_ROLE_KEY must be set in .env file (action-blocker/.env or wallet-back/.env)")
             
+            print(f"🔗 Connecting to Supabase: {supabase_url[:30]}...")
             self.supabase = create_client(supabase_url, supabase_service_key)
             self.rules_engine = RulesEngine(self.supabase)
             
@@ -123,6 +191,7 @@ class ActionBlockerService:
             return True
         except Exception as e:
             print(f"❌ Error initializing service: {e}")
+            print(f"   Make sure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are set in action-blocker/.env")
             return False
     
     def check_pending_transactions(self):

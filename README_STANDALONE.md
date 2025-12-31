@@ -95,3 +95,4 @@ When it detects flagged transactions:
 2. Verify Supabase credentials are correct
 3. Check for error messages in console
 
+
