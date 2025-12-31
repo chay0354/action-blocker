@@ -73,6 +73,13 @@ class ApproveTransactionRequest(BaseModel):
     reviewed_by: Optional[str] = None  # Admin user ID
     review_notes: Optional[str] = None
 
+class ProcessTransactionRequest(BaseModel):
+    """Request to process a transaction - Action Blocker decides auto-approve or flag for review"""
+    from_user_id: str
+    to_user_id: str
+    amount: float
+    sender_balance: Optional[float] = 0
+
 @app.get("/")
 def read_root():
     return {"message": "Action Blocker API", "status": "running"}
@@ -133,6 +140,101 @@ def check_transaction(request: TransactionCheckRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/api/process-transaction")
+def process_transaction(request: ProcessTransactionRequest):
+    """
+    Process a transaction - Action Blocker acts as adapter:
+    - Checks rules
+    - If no violations → Auto-approves and executes immediately
+    - If violations → Flags for admin review (saves to pending_transactions)
+    """
+    try:
+        engine = get_rules_engine()
+        supabase_client = get_supabase()
+        
+        context = {
+            "sender_balance": request.sender_balance,
+            "supabase": supabase_client
+        }
+        
+        transaction = {
+            "from_user_id": request.from_user_id,
+            "to_user_id": request.to_user_id,
+            "amount": request.amount
+        }
+        
+        # Check transaction against rules
+        needs_approval, violations = engine.check_transaction(transaction, context)
+        
+        # Action Blocker Decision:
+        if not needs_approval:
+            # No violations → Auto-approve and execute immediately
+            print(f"✅ Transaction passed all rules - auto-approving and executing")
+            
+            # Get sender's wallet
+            sender_wallet = supabase_client.table("wallets").select("balance").eq("user_id", request.from_user_id).execute()
+            if not sender_wallet.data:
+                raise HTTPException(status_code=400, detail="Sender wallet not found")
+            
+            sender_balance = float(sender_wallet.data[0]["balance"])
+            
+            # Check if sender has sufficient balance
+            if sender_balance < request.amount:
+                raise HTTPException(status_code=400, detail=f"Insufficient balance: ${sender_balance:.2f} < ${request.amount:.2f}")
+            
+            # Get recipient's wallet
+            recipient_wallet = supabase_client.table("wallets").select("balance").eq("user_id", request.to_user_id).execute()
+            recipient_balance = float(recipient_wallet.data[0]["balance"]) if recipient_wallet.data else 1000.0
+            
+            # Update balances
+            new_sender_balance = sender_balance - request.amount
+            new_recipient_balance = recipient_balance + request.amount
+            
+            supabase_client.table("wallets").update({"balance": new_sender_balance}).eq("user_id", request.from_user_id).execute()
+            supabase_client.table("wallets").update({"balance": new_recipient_balance}).eq("user_id", request.to_user_id).execute()
+            
+            # Create transaction record
+            transaction_record = supabase_client.table("transactions").insert({
+                "from_user_id": request.from_user_id,
+                "to_user_id": request.to_user_id,
+                "amount": request.amount
+            }).execute()
+            
+            return {
+                "message": "Transaction auto-approved and executed",
+                "status": "approved",
+                "auto_approved": True,
+                "transaction_id": transaction_record.data[0]["id"] if transaction_record.data else None,
+                "new_balance": new_sender_balance,
+                "requires_approval": False
+            }
+        else:
+            # Has violations → Flag for admin review
+            print(f"⚠️  Transaction has violations - flagging for admin review: {violations}")
+            
+            # Save to pending_transactions for admin review
+            pending_tx = supabase_client.table("pending_transactions").insert({
+                "from_user_id": request.from_user_id,
+                "to_user_id": request.to_user_id,
+                "amount": request.amount,
+                "status": "pending",
+                "violations": json.dumps(violations)
+            }).execute()
+            
+            return {
+                "message": "Transaction flagged for review",
+                "status": "pending",
+                "auto_approved": False,
+                "pending_transaction_id": pending_tx.data[0]["id"] if pending_tx.data else None,
+                "violations": violations,
+                "requires_approval": True
+            }
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing transaction: {str(e)}")
+
 @app.post("/api/approve-transaction")
 def approve_transaction(request: ApproveTransactionRequest):
     """
@@ -182,7 +284,7 @@ def approve_transaction(request: ApproveTransactionRequest):
             "id", request.transaction_id
         ).execute()
         
-        # If approved, re-check rules and execute the transaction
+        # If approved, execute the transaction
         if request.approve:
             from_user_id = pending_tx["from_user_id"]
             to_user_id = pending_tx["to_user_id"]
@@ -199,31 +301,6 @@ def approve_transaction(request: ApproveTransactionRequest):
                 raise HTTPException(status_code=400, detail="Sender wallet not found")
             
             sender_balance = float(sender_wallet.data[0]["balance"])
-            
-            # Re-check transaction against rules (Action Blocker validates again)
-            engine = get_rules_engine()
-            context = {
-                "sender_balance": sender_balance,
-                "supabase": supabase_client
-            }
-            
-            transaction = {
-                "from_user_id": from_user_id,
-                "to_user_id": to_user_id,
-                "amount": amount
-            }
-            
-            needs_approval, violations = engine.check_transaction(transaction, context)
-            
-            # If rules still flag violations, admin can override, but we log it
-            if needs_approval and violations:
-                # Admin is explicitly approving despite violations - allow override
-                # But we update violations to show current rule status
-                print(f"⚠️  Admin approving transaction despite current violations: {violations}")
-                # Update violations in pending_transactions to reflect current rule check
-                supabase_client.table("pending_transactions").update({
-                    "violations": json.dumps(violations)
-                }).eq("id", request.transaction_id).execute()
             
             # Check if sender has sufficient balance
             if sender_balance < amount:
