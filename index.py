@@ -5,6 +5,7 @@ Compatible with Vercel serverless functions
 import os
 import sys
 from typing import Dict, Any, Optional
+from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -139,7 +140,6 @@ def approve_transaction(request: ApproveTransactionRequest):
     This is the central authority for all approval decisions
     """
     try:
-        from datetime import datetime
         supabase_client = get_supabase()
         
         # Get pending transaction
