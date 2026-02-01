@@ -15,6 +15,7 @@ import json
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(__file__))
 from rules_engine import RulesEngine
+from kernel import evaluate as kernel_evaluate
 from supabase import create_client, Client
 
 # Load environment variables
@@ -80,6 +81,13 @@ class ProcessTransactionRequest(BaseModel):
     amount: float
     sender_balance: Optional[float] = 0
 
+class AnalyzeTransactionRequest(BaseModel):
+    """Request to analyze a transaction - Agents → Kernel → Persist → Response"""
+    from_user_id: str
+    to_user_id: str
+    amount: float
+    sender_balance: Optional[float] = 0
+
 @app.get("/")
 def read_root():
     return {"message": "Action Blocker API", "status": "running"}
@@ -140,11 +148,27 @@ def check_transaction(request: TransactionCheckRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+def _persist_analysis(supabase_client, from_user_id: str, to_user_id: str, amount: float,
+                     violations: list, kernel_decision: str) -> Optional[str]:
+    """Persist analysis to transaction_analyses, return analysis id"""
+    try:
+        result = supabase_client.table("transaction_analyses").insert({
+            "from_user_id": from_user_id,
+            "to_user_id": to_user_id,
+            "amount": amount,
+            "violations": json.dumps(violations) if violations else None,
+            "kernel_decision": kernel_decision
+        }).execute()
+        return result.data[0]["id"] if result.data else None
+    except Exception:
+        return None
+
 @app.post("/api/process-transaction")
 def process_transaction(request: ProcessTransactionRequest):
     """
-    Process a transaction - Action Blocker acts as adapter:
-    - Checks rules
+    Process a transaction - Pipeline: Agents → Kernel → Persist → Response
+    - Checks rules (Agents)
+    - Kernel evaluates (Hard-Stop: timeout/agent_error → L)
     - If no violations → Auto-approves and executes immediately
     - If violations → Flags for admin review (saves to pending_transactions)
     """
@@ -163,10 +187,26 @@ def process_transaction(request: ProcessTransactionRequest):
             "amount": request.amount
         }
         
-        # Check transaction against rules
-        needs_approval, violations = engine.check_transaction(transaction, context)
+        # Agents: Check transaction against rules (Hard-Stop: agent_error → L)
+        agent_error = False
+        try:
+            needs_approval, violations = engine.check_transaction(transaction, context)
+        except Exception as e:
+            agent_error = True
+            needs_approval = True
+            violations = [f"Agent error: {str(e)}"]
         
-        # Action Blocker Decision:
+        # Kernel: Deterministic decision layer (Hard-Stop: agent_error/timeout → L)
+        kernel_context = {"needs_approval": needs_approval, "violations": violations, "agent_error": agent_error}
+        kernel_decision = kernel_evaluate(kernel_context)
+        
+        # Persist analysis with kernel_decision
+        analysis_id = _persist_analysis(
+            supabase_client, request.from_user_id, request.to_user_id, request.amount,
+            violations, kernel_decision
+        )
+        
+        # Action Blocker Decision (unchanged flow):
         if not needs_approval:
             # No violations → Auto-approve and execute immediately
             print(f"✅ Transaction passed all rules - auto-approving and executing")
@@ -206,7 +246,9 @@ def process_transaction(request: ProcessTransactionRequest):
                 "auto_approved": True,
                 "transaction_id": transaction_record.data[0]["id"] if transaction_record.data else None,
                 "new_balance": new_sender_balance,
-                "requires_approval": False
+                "requires_approval": False,
+                "kernel_decision": kernel_decision,
+                "analysis_id": analysis_id
             }
         else:
             # Has violations → Flag for admin review
@@ -227,13 +269,100 @@ def process_transaction(request: ProcessTransactionRequest):
                 "auto_approved": False,
                 "pending_transaction_id": pending_tx.data[0]["id"] if pending_tx.data else None,
                 "violations": violations,
-                "requires_approval": True
+                "requires_approval": True,
+                "kernel_decision": kernel_decision,
+                "analysis_id": analysis_id
             }
             
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing transaction: {str(e)}")
+
+@app.post("/api/analyze")
+def analyze_transaction(request: AnalyzeTransactionRequest):
+    """
+    Analyze a transaction - Pipeline: Agents → Kernel → Persist → Response
+    Does not execute, only evaluates and persists analysis with kernel_decision
+    """
+    try:
+        engine = get_rules_engine()
+        supabase_client = get_supabase()
+        
+        context = {
+            "sender_balance": request.sender_balance,
+            "supabase": supabase_client
+        }
+        
+        transaction = {
+            "from_user_id": request.from_user_id,
+            "to_user_id": request.to_user_id,
+            "amount": request.amount
+        }
+        
+        # Agents: Check transaction against rules (Hard-Stop: agent_error → L)
+        agent_error = False
+        try:
+            needs_approval, violations = engine.check_transaction(transaction, context)
+        except Exception as e:
+            agent_error = True
+            needs_approval = True
+            violations = [f"Agent error: {str(e)}"]
+        
+        # Kernel: Deterministic decision layer
+        kernel_context = {"needs_approval": needs_approval, "violations": violations, "agent_error": agent_error}
+        kernel_decision = kernel_evaluate(kernel_context)
+        
+        # Persist analysis with kernel_decision
+        analysis_id = _persist_analysis(
+            supabase_client, request.from_user_id, request.to_user_id, request.amount,
+            violations, kernel_decision
+        )
+        
+        return {
+            "kernel_decision": kernel_decision,
+            "analysis_id": analysis_id,
+            "needs_approval": needs_approval,
+            "violations": violations
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/analyses/{analysis_id}")
+def get_analysis(analysis_id: str):
+    """Get analysis by id - always returns kernel_decision field"""
+    try:
+        supabase_client = get_supabase()
+        result = supabase_client.table("transaction_analyses").select("*").eq(
+            "id", analysis_id
+        ).execute()
+        
+        if not result.data or len(result.data) == 0:
+            raise HTTPException(status_code=404, detail="Analysis not found")
+        
+        analysis = result.data[0]
+        violations = analysis.get("violations")
+        if isinstance(violations, str):
+            try:
+                violations = json.loads(violations)
+            except Exception:
+                violations = []
+        
+        return {
+            "id": analysis["id"],
+            "from_user_id": analysis["from_user_id"],
+            "to_user_id": analysis["to_user_id"],
+            "amount": float(analysis["amount"]),
+            "violations": violations,
+            "kernel_decision": analysis.get("kernel_decision"),
+            "created_at": analysis["created_at"]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/approve-transaction")
 def approve_transaction(request: ApproveTransactionRequest):

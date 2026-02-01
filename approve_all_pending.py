@@ -15,7 +15,7 @@ from supabase import create_client, Client
 load_dotenv()
 
 # Configuration
-WALLET_BACK_URL = os.getenv("WALLET_BACK_URL", "http://127.0.0.1:8000")
+WALLET_BACK_URL = os.getenv("WALLET_BACK_URL", "https://wallet-back-nu.vercel.app/")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", "admin@admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 

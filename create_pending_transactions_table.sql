@@ -62,3 +62,11 @@ VALUES
 ON CONFLICT (rule_id) DO NOTHING;
 
 
+
+
+
+
+
+
+
+

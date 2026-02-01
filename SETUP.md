@@ -113,11 +113,11 @@ You can test the API endpoints directly:
 
 ```bash
 # Get pending transactions
-curl -X GET "http://127.0.0.1:8000/api/admin/pending-transactions" \
+curl -X GET "https://wallet-back-nu.vercel.app//api/admin/pending-transactions" \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN"
 
 # Approve a transaction
-curl -X POST "http://127.0.0.1:8000/api/admin/approve-transaction" \
+curl -X POST "https://wallet-back-nu.vercel.app//api/admin/approve-transaction" \
   -H "Authorization: Bearer YOUR_ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -133,5 +133,13 @@ curl -X POST "http://127.0.0.1:8000/api/admin/approve-transaction" \
 - Add more rule types as needed
 - Consider adding email notifications
 - Build rule management UI (optional)
+
+
+
+
+
+
+
+
 
 

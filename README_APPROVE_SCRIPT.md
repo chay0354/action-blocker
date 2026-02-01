@@ -18,7 +18,7 @@ This script allows you to approve or reject all pending transactions, even when 
 
 ```env
 # Required for API mode
-WALLET_BACK_URL=http://127.0.0.1:8000
+WALLET_BACK_URL=https://wallet-back-nu.vercel.app/
 ADMIN_EMAIL=admin@admin
 ADMIN_PASSWORD=admin123
 
@@ -104,7 +104,7 @@ This ensures that:
 ======================================================================
 APPROVE ALL PENDING TRANSACTIONS
 ======================================================================
-Wallet Back URL: http://127.0.0.1:8000
+Wallet Back URL: https://wallet-back-nu.vercel.app/
 Action: APPROVE
 ======================================================================
 Authenticating as admin: admin@admin
@@ -164,4 +164,12 @@ Failed: 0
 
 - `wallet-back/main.py` - Contains the approve transaction endpoint
 - `action-blocker/create_pending_transactions_table.sql` - Database schema
+
+
+
+
+
+
+
+
 

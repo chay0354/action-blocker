@@ -76,3 +76,11 @@ curl -X POST https://your-project.vercel.app/api/check-transaction \
 - For better performance, consider using Vercel's Edge Functions or caching
 - Make sure your Supabase database has the required tables (run the SQL scripts)
 
+
+
+
+
+
+
+
+
